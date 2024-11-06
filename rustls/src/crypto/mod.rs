@@ -546,6 +546,10 @@ pub trait ActiveKeyExchange: Send + Sync {
         None
     }
 
+    fn maybe_hybrid(self: Box<Self>) -> MaybeHybrid where Self: 'static {
+        MaybeHybrid::Single(Box::new(self))
+    }
+
     /// Completes the classical component of the key exchange, given the peer's public key.
     ///
     /// This is only called if `hybrid_component` returns `Some(_)`.
@@ -591,6 +595,47 @@ pub trait ActiveKeyExchange: Send + Sync {
 
     /// Return the group being used.
     fn group(&self) -> NamedGroup;
+}
+
+impl<T: ActiveKeyExchange + ?Sized> ActiveKeyExchange for Box<T> {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+        (*self).complete(peer_pub_key)
+    }
+
+    fn complete_for_tls_version(
+        self: Box<Self>,
+        peer_pub_key: &[u8],
+        tls_version: &SupportedProtocolVersion,
+    ) -> Result<SharedSecret, Error> {
+        (*self).complete_for_tls_version(peer_pub_key, tls_version)
+    }
+
+    fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
+        (**self).hybrid_component()
+    }
+
+    fn complete_hybrid_component(
+        self: Box<Self>,
+        peer_pub_key: &[u8],
+    ) -> Result<SharedSecret, Error> {
+        (*self).complete_hybrid_component(peer_pub_key)
+    }
+
+    fn pub_key(&self) -> &[u8] {
+        (**self).pub_key()
+    }
+
+    fn ffdhe_group(&self) -> Option<FfdheGroup<'static>> {
+        (**self).ffdhe_group()
+    }
+
+    fn group(&self) -> NamedGroup {
+        (**self).group()
+    }
+}
+
+pub enum MaybeHybrid {
+    Single(Box<dyn ActiveKeyExchange>),
 }
 
 /// The result from [`SupportedKxGroup::start_and_complete()`].
