@@ -427,7 +427,6 @@ mod rand;
 mod record_layer;
 #[cfg(feature = "std")]
 mod stream;
-#[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
 mod vecbuf;
@@ -554,7 +553,6 @@ pub use crate::suites::{
 };
 #[cfg(feature = "std")]
 pub use crate::ticketer::TicketRotator;
-#[cfg(feature = "tls12")]
 pub use crate::tls12::Tls12CipherSuite;
 pub use crate::tls13::Tls13CipherSuite;
 pub use crate::verify::DigitallySignedStruct;
@@ -571,7 +569,6 @@ pub mod client {
     mod hs;
     #[cfg(test)]
     mod test;
-    #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
 
@@ -617,7 +614,6 @@ pub mod server {
     mod server_conn;
     #[cfg(test)]
     mod test;
-    #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
 
@@ -657,9 +653,9 @@ pub use server::ServerConnection;
 ///
 /// ALL_VERSIONS is a provided as an array of all of these values.
 pub mod version {
-    #[cfg(feature = "tls12")]
-    pub use crate::versions::TLS12;
-    pub use crate::versions::{TLS12_VERSION, TLS13, TLS13_VERSION, Tls12Version, Tls13Version};
+    pub use crate::versions::{
+        TLS12, TLS12_VERSION, TLS13, TLS13_VERSION, Tls12Version, Tls13Version,
+    };
 }
 
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
