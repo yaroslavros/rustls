@@ -697,3 +697,7 @@ mod hash_map {
     #[cfg(all(not(feature = "std"), feature = "hashbrown"))]
     pub(crate) use hashbrown::hash_map::Entry;
 }
+
+mod sealed {
+    pub trait Sealed {}
+}
