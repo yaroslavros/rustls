@@ -1,6 +1,7 @@
-use crate::enums::{ContentType, HandshakeType};
+use crate::enums::{ContentType, HandshakeType, PostHandshakeMessageType};
 use crate::error::Error;
 use crate::log::warn;
+use crate::msgs::handshake::PostHandshakeMessagePayload;
 use crate::msgs::message::MessagePayload;
 
 /// For a Message $m, and a HandshakePayload enum member $payload_type,
@@ -66,5 +67,17 @@ pub(crate) fn inappropriate_handshake_message(
             }
         }
         payload => inappropriate_message(payload, content_types),
+    }
+}
+
+pub(crate) fn inappropriate_posthandshake_message(
+    payload: &PostHandshakeMessagePayload<'_>,
+    handshake_types: &[PostHandshakeMessageType],
+) -> Error {
+    let got_type = payload.handshake_type();
+    warn!("Received a {got_type:?} handshake message while expecting {handshake_types:?}",);
+    Error::InappropriatePostHandshakeMessage {
+        expect_types: handshake_types.to_vec(),
+        got_type,
     }
 }

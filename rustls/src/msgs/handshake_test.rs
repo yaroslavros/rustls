@@ -840,6 +840,7 @@ fn sample_server_hello_payload() -> ServerHelloPayload {
             transport_parameters: Some(Payload::new(vec![1, 2, 3])),
             client_certificate_type: Some(CertificateType::RawPublicKey),
             server_certificate_type: Some(CertificateType::RawPublicKey),
+            tls_flags: None,
             unknown_extensions: Default::default(),
         }),
     }

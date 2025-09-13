@@ -8,7 +8,7 @@ use std::time::SystemTimeError;
 use pki_types::{AlgorithmIdentifier, ServerName, UnixTime};
 use webpki::KeyUsage;
 
-use crate::enums::{AlertDescription, ContentType, HandshakeType};
+use crate::enums::{AlertDescription, ContentType, HandshakeType, PostHandshakeMessageType};
 use crate::msgs::handshake::{EchConfigPayload, KeyExchangeAlgorithm};
 use crate::rand;
 
@@ -36,6 +36,16 @@ pub enum Error {
         expect_types: Vec<HandshakeType>,
         /// What handshake type we received
         got_type: HandshakeType,
+    },
+
+    /// We received a TLS post handshake message that isn't valid right now.
+    /// `expect_types` lists the handshake message types we can expect
+    /// right now.  `got_type` is the type we found.
+    InappropriatePostHandshakeMessage {
+        /// Which handshake type we expected
+        expect_types: Vec<PostHandshakeMessageType>,
+        /// What handshake type we received
+        got_type: PostHandshakeMessageType,
     },
 
     /// An error occurred while handling Encrypted Client Hello (ECH).
@@ -270,6 +280,7 @@ pub enum PeerMisbehaved {
     InvalidKeyShare,
     KeyEpochWithPendingFragment,
     KeyUpdateReceivedInQuicConnection,
+    StandardKeyUpdateReceivedWhenExtendedKeyUpdateNegotiated,
     MessageInterleavedWithHandshakeMessage,
     MissingBinderInPskExtension,
     MissingKeyShare,
@@ -316,6 +327,13 @@ pub enum PeerMisbehaved {
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
     UnsolicitedEchExtension,
+    ExtendedKeyUpdateWithoutNegotiation,
+    ExtendedKeyUpdateRequestWhileAnotherInProgress,
+    ExtendedKeyUpdateRequestBeforeKeyExchangeComplete,
+    ExtendedKeyUpdateRequestWithDifferentGroup,
+    ExtendedKeyUpdateResponseWithoutRequest,
+    ExtendedKeyUpdateResponseWithDifferentGroup,
+    ExtendedKeyUpdateNewKeyBeforeExchange,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -980,6 +998,15 @@ impl fmt::Display for Error {
                 "received unexpected handshake message: got {:?} when expecting {}",
                 got_type,
                 join::<HandshakeType>(expect_types)
+            ),
+            Self::InappropriatePostHandshakeMessage {
+                expect_types,
+                got_type,
+            } => write!(
+                f,
+                "received unexpected post-handshake message: got {:?} when expecting {}",
+                got_type,
+                join::<PostHandshakeMessageType>(expect_types)
             ),
             Self::InvalidMessage(typ) => {
                 write!(f, "received corrupt message of type {typ:?}")

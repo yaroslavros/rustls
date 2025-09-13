@@ -281,6 +281,9 @@ pub struct ClientConfig {
 
     /// How to offer Encrypted Client Hello (ECH). The default is to not offer ECH.
     pub(super) ech_mode: Option<EchMode>,
+
+    /// Should client offer Extended Key Update to the server
+    pub extended_key_update: bool,
 }
 
 impl ClientConfig {

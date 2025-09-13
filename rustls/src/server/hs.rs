@@ -22,7 +22,7 @@ use crate::msgs::enums::{Compression, ExtensionType, NamedGroup};
 use crate::msgs::handshake::SessionId;
 use crate::msgs::handshake::{
     ClientHelloPayload, HandshakePayload, KeyExchangeAlgorithm, ProtocolName, Random,
-    ServerExtensions, ServerExtensionsInput, ServerNamePayload, SingleProtocolName,
+    ServerExtensions, ServerExtensionsInput, ServerNamePayload, SingleProtocolName, TLSFlags,
     TransportParameters,
 };
 use crate::msgs::message::{Message, MessagePayload};
@@ -162,6 +162,12 @@ impl ExtensionProcessing {
         } else {
             // Throw away any OCSP response so we don't try to send it later.
             ocsp_response.take();
+        }
+
+        if cx.common.extended_key_update.is_some() {
+            self.extensions.tls_flags = Some(TLSFlags {
+                extended_key_update: true,
+            })
         }
 
         self.validate_server_cert_type_extension(hello, config, cx)?;

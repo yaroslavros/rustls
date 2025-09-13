@@ -5,7 +5,10 @@ use crate::msgs::base::Payload;
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
-use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
+use crate::msgs::handshake::{
+    HandshakeMessagePayload, HandshakePayload, KeyShareEntry, NewSessionTicketPayloadTls13,
+    PostHandshakeMessagePayload,
+};
 
 mod inbound;
 pub use inbound::{BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage};
@@ -195,6 +198,46 @@ impl Message<'_> {
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
                 HandshakePayload::KeyUpdate(KeyUpdateRequest::UpdateRequested),
+            )),
+        }
+    }
+
+    pub(crate) fn build_extended_key_update_request(key_share: KeyShareEntry) -> Self {
+        Self {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::PostHandshakeMessage(
+                    PostHandshakeMessagePayload::KeyUpdateRequest(key_share),
+                ),
+            )),
+        }
+    }
+
+    pub(crate) fn build_extended_key_update_response(key_share: KeyShareEntry) -> Self {
+        Self {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::PostHandshakeMessage(
+                    PostHandshakeMessagePayload::KeyUpdateResponse(key_share),
+                ),
+            )),
+        }
+    }
+
+    pub fn build_extended_key_update_new_key() -> Self {
+        Self {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::PostHandshakeMessage(PostHandshakeMessagePayload::NewKeyUpdate),
+            )),
+        }
+    }
+
+    pub(crate) fn build_session_ticket(payload: NewSessionTicketPayloadTls13) -> Self {
+        Self {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::NewSessionTicketTls13(payload),
             )),
         }
     }

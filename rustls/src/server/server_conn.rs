@@ -444,6 +444,9 @@ pub struct ServerConfig {
     ///
     /// [RFC8779]: https://datatracker.ietf.org/doc/rfc8879/
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    /// Should server accept Extended Key Update from the client
+    pub extended_key_update: bool,
 }
 
 impl ServerConfig {

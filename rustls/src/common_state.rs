@@ -4,17 +4,19 @@ use alloc::vec::Vec;
 use pki_types::CertificateDer;
 
 use crate::conn::kernel::KernelState;
-use crate::crypto::SupportedKxGroup;
+use crate::crypto::{ActiveKeyExchange, SupportedKxGroup};
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
-use crate::hash_hs::HandshakeHash;
+use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, error, warn};
 use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
-use crate::msgs::handshake::{CertificateChain, HandshakeMessagePayload, ProtocolName};
+use crate::msgs::handshake::{
+    CertificateChain, HandshakeMessagePayload, KeyShareEntry, ProtocolName,
+};
 use crate::msgs::message::{
     Message, MessagePayload, OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage,
     PlainMessage,
@@ -23,6 +25,7 @@ use crate::record_layer::PreEncryptAction;
 use crate::suites::{PartiallyExtractedSecrets, SupportedCipherSuite};
 #[cfg(feature = "tls12")]
 use crate::tls12::ConnectionSecrets;
+use crate::tls13::key_schedule::{KeyScheduleExtendedKeyUpdate, KeyScheduleResumption, KeyScheduleTraffic};
 use crate::unbuffered::{EncryptError, InsufficientSizeError};
 use crate::vecbuf::ChunkVecBuffer;
 use crate::{quic, record_layer};
@@ -61,6 +64,7 @@ pub struct CommonState {
     pub(crate) refresh_traffic_keys_pending: bool,
     pub(crate) fips: bool,
     pub(crate) tls13_tickets_received: u32,
+    pub(crate) extended_key_update: Option<ExtendedKeyUpdate>,
 }
 
 impl CommonState {
@@ -94,6 +98,7 @@ impl CommonState {
             refresh_traffic_keys_pending: false,
             fips: false,
             tls13_tickets_received: 0,
+            extended_key_update: None,
         }
     }
 
@@ -777,6 +782,154 @@ impl CommonState {
 
         self.send_plain_non_buffering(payload, limit)
     }
+
+    pub(crate) fn extended_key_update_initiator(&mut self) -> Result<(), Error> {
+        let Some(ExtendedKeyUpdate::Idle) = self.extended_key_update else {
+            return Ok(());
+        };
+        let KxState::Complete(kx) = self.kx_state else {
+            return Ok(());
+        };
+        let akx = kx.start()?;
+        let msg = Message::build_extended_key_update_request(KeyShareEntry::new(
+            akx.group(),
+            akx.pub_key(),
+        ));
+        let mut transcript = HandshakeHashBuffer::new().start_hash(
+            self.suite
+                .expect("No suite found")
+                .hash_provider(),
+        );
+        transcript.add_message(&msg);
+        self.send_msg_encrypt(msg.into());
+        self.extended_key_update = Some(ExtendedKeyUpdate::Initiated(akx, transcript));
+        Ok(())
+    }
+
+    pub(crate) fn extended_key_update_responder(
+        &mut self,
+        key_share: &KeyShareEntry,
+        ks_eku: &mut KeyScheduleExtendedKeyUpdate,
+        mut transcript_eku: HandshakeHash,
+    ) -> Result<(), Error> {
+        let Some(ref mut extended_key_update_status) = self.extended_key_update else {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
+            ));
+        };
+        match extended_key_update_status {
+            ExtendedKeyUpdate::Initiated(our_key_share, _) => {
+                if key_share.payload.0.as_slice() <= our_key_share.pub_key() {
+                    return Ok(());
+                }
+            }
+            ExtendedKeyUpdate::Idle => {}
+            _ => {
+                return Err(self.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::ExtendedKeyUpdateRequestWhileAnotherInProgress,
+                ));
+            }
+        }
+        let KxState::Complete(kx) = self.kx_state else {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateRequestBeforeKeyExchangeComplete,
+            ));
+        };
+        if key_share.group != kx.name() {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateRequestWithDifferentGroup,
+            ));
+        }
+
+        let ckx = kx
+            .start_and_complete(&key_share.payload.0)
+            .map_err(|err| self.send_fatal_alert(AlertDescription::IllegalParameter, err))?;
+        let msg =
+            Message::build_extended_key_update_response(KeyShareEntry::new(ckx.group, ckx.pub_key));
+        transcript_eku.add_message(&msg);
+        self.send_msg_encrypt(msg.into());
+        ks_eku.input_eku_secret(ckx.secret, transcript_eku.current_hash());
+        self.extended_key_update = Some(ExtendedKeyUpdate::Responded);
+
+        Ok(())
+    }
+
+    pub(crate) fn extended_key_update_initiator_respond(
+        &mut self,
+        key_share: &KeyShareEntry,
+        ks_eku: &mut KeyScheduleExtendedKeyUpdate,
+        msg: &Message<'_>,
+        ks: &mut KeyScheduleTraffic,
+    ) -> Result<(), Error> {
+        let Some(mut extended_key_update_status) = self.extended_key_update.take() else {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
+            ));
+        };
+        let ExtendedKeyUpdate::Initiated(our_key_share, ref mut transcript_eku) =
+            extended_key_update_status
+        else {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateResponseWithoutRequest,
+            ));
+        };
+        if key_share.group != our_key_share.group() {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateResponseWithDifferentGroup,
+            ));
+        }
+        let secret = our_key_share
+            .complete(&key_share.payload.0)
+            .map_err(|err| self.send_fatal_alert(AlertDescription::IllegalParameter, err))?;
+        transcript_eku.add_message(&msg);
+        ks_eku.input_eku_secret(secret, transcript_eku.current_hash());
+        self.check_aligned_handshake()?;
+        let msg = Message::build_extended_key_update_new_key();
+        self.send_msg_encrypt(msg.into());
+        ks_eku.initiator_send(ks, self);
+        self.extended_key_update = Some(ExtendedKeyUpdate::NewKeySent);
+
+        Ok(())
+    }
+
+    pub(crate) fn extended_key_update_new_key_update(
+        &mut self,
+        ks_eku: &mut KeyScheduleExtendedKeyUpdate,
+        ks: &mut KeyScheduleTraffic,
+    ) -> Result<KeyScheduleResumption, Error> {
+        match self.extended_key_update {
+            Some(ExtendedKeyUpdate::NewKeySent) => {
+                self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+                Ok(ks_eku.initiator_recv(ks, self))
+            }
+            Some(ExtendedKeyUpdate::Responded) => {
+                self.check_aligned_handshake()?;
+                let msg = Message::build_extended_key_update_new_key();
+                self.send_msg_encrypt(msg.into());
+                self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+                Ok(ks_eku.responder(ks, self))
+            }
+            Some(_) => {
+                return Err(self.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::ExtendedKeyUpdateNewKeyBeforeExchange,
+                ));
+            }
+            None => {
+                return Err(self.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
+                ));
+            }
+        }
+    }
 }
 
 /// Describes which sort of handshake happened.
@@ -1046,6 +1199,13 @@ impl<'a, const TLS13: bool> HandshakeFlight<'a, TLS13> {
 #[cfg(feature = "tls12")]
 pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false>;
 pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true>;
+
+pub(crate) enum ExtendedKeyUpdate {
+    Idle,
+    Initiated(Box<dyn ActiveKeyExchange>, HandshakeHash),
+    Responded,
+    NewKeySent,
+}
 
 const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
 pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;

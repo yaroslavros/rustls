@@ -141,6 +141,7 @@ enum_builder! {
         SignatureAlgorithmsCert => 0x0032,
         KeyShare => 0x0033,
         TransportParameters => 0x0039,
+        TLSFlags => 0x003e, // https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#tls-extensiontype-values-1
         NextProtocolNegotiation => 0x3374,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,

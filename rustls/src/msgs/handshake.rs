@@ -14,7 +14,7 @@ use crate::crypto::ActiveKeyExchange;
 use crate::crypto::SecureRandom;
 use crate::enums::{
     CertificateCompressionAlgorithm, CertificateType, CipherSuite, EchClientHelloType,
-    HandshakeType, ProtocolVersion, SignatureScheme,
+    HandshakeType, PostHandshakeMessageType, ProtocolVersion, SignatureScheme,
 };
 use crate::error::InvalidMessage;
 #[cfg(feature = "tls12")]
@@ -823,6 +823,31 @@ impl TransportParameters<'_> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TLSFlags {
+    pub(crate) extended_key_update: bool,
+}
+
+impl Codec<'_> for TLSFlags {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        if self.extended_key_update {
+            1u8.encode(bytes);
+        } else {
+            0u8.encode(bytes);
+        }
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        let Ok(byte) = u8::read(r) else {
+            return Err(InvalidMessage::MissingData("TLSFlags"));
+        };
+        let extended_key_update = byte & 1 == 1;
+        Ok(Self {
+            extended_key_update,
+        })
+    }
+}
+
 extension_struct! {
     /// A representation of extensions present in a `ClientHello` message
     ///
@@ -919,6 +944,9 @@ extension_struct! {
         /// Encrypted client hello outer extensions (draft-ietf-tls-esni)
         ExtensionType::EncryptedClientHelloOuterExtensions =>
             pub(crate) encrypted_client_hello_outer: Option<Vec<ExtensionType>>,
+
+        ExtensionType::TLSFlags =>
+            pub(crate) tls_flags: Option<TLSFlags>,
     } + {
         /// Order randomization seed.
         pub(crate) order_seed: u16,
@@ -953,6 +981,7 @@ impl ClientExtensions<'_> {
             renegotiation_info,
             encrypted_client_hello,
             encrypted_client_hello_outer,
+            tls_flags,
             order_seed,
             contiguous_extensions,
         } = self;
@@ -979,6 +1008,7 @@ impl ClientExtensions<'_> {
             renegotiation_info,
             encrypted_client_hello,
             encrypted_client_hello_outer,
+            tls_flags,
             order_seed,
             contiguous_extensions,
         }
@@ -1181,6 +1211,10 @@ extension_struct! {
         /// Encrypted inner client hello response (draft-ietf-tls-esni)
         ExtensionType::EncryptedClientHello =>
             pub(crate) encrypted_client_hello_ack: Option<ServerEncryptedClientHello>,
+
+        /// TLS Flags (draft-ietf-tls-tlsflags)
+        ExtensionType::TLSFlags =>
+            pub(crate) tls_flags: Option<TLSFlags>,
     } + {
         pub(crate) unknown_extensions: BTreeSet<u16>,
     }
@@ -1204,6 +1238,7 @@ impl ServerExtensions<'_> {
             transport_parameters,
             early_data_ack,
             encrypted_client_hello_ack,
+            tls_flags,
             unknown_extensions,
         } = self;
         ServerExtensions {
@@ -1222,6 +1257,7 @@ impl ServerExtensions<'_> {
             transport_parameters: transport_parameters.map(|x| x.into_owned()),
             early_data_ack,
             encrypted_client_hello_ack,
+            tls_flags,
             unknown_extensions,
         }
     }
@@ -2495,6 +2531,64 @@ impl CompressedCertificatePayload<'_> {
 }
 
 #[derive(Debug)]
+pub(crate) enum PostHandshakeMessagePayload<'a> {
+    KeyUpdateRequest(KeyShareEntry),
+    KeyUpdateResponse(KeyShareEntry),
+    NewKeyUpdate,
+    Unknown((PostHandshakeMessageType, Payload<'a>)),
+}
+
+impl<'a> PostHandshakeMessagePayload<'a> {
+    pub(crate) fn handshake_type(&self) -> PostHandshakeMessageType {
+        match self {
+            Self::KeyUpdateRequest(_) => PostHandshakeMessageType::KeyUpdateRequest,
+            Self::KeyUpdateResponse(_) => PostHandshakeMessageType::KeyUpdateResponse,
+            Self::NewKeyUpdate => PostHandshakeMessageType::NewKeyUpdate,
+            Self::Unknown((t, _)) => *t,
+        }
+    }
+
+    fn into_owned(self) -> PostHandshakeMessagePayload<'static> {
+        match self {
+            Self::KeyUpdateRequest(x) => PostHandshakeMessagePayload::KeyUpdateRequest(x),
+            Self::KeyUpdateResponse(x) => PostHandshakeMessagePayload::KeyUpdateResponse(x),
+            Self::NewKeyUpdate => PostHandshakeMessagePayload::NewKeyUpdate,
+            Self::Unknown((typ, payload)) => {
+                PostHandshakeMessagePayload::Unknown((typ, payload.into_owned()))
+            }
+        }
+    }
+}
+
+impl<'a> Codec<'a> for PostHandshakeMessagePayload<'a> {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.handshake_type().encode(bytes);
+        if let Self::KeyUpdateRequest(key_share) = self {
+            key_share.encode(bytes);
+        };
+        if let Self::KeyUpdateResponse(key_share) = self {
+            key_share.encode(bytes);
+        };
+    }
+
+    fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
+        let typ = PostHandshakeMessageType::read(r)?;
+        let payload = match typ {
+            PostHandshakeMessageType::KeyUpdateRequest => {
+                Self::KeyUpdateRequest(KeyShareEntry::read(r)?)
+            }
+            PostHandshakeMessageType::KeyUpdateResponse => {
+                Self::KeyUpdateResponse(KeyShareEntry::read(r)?)
+            }
+            PostHandshakeMessageType::NewKeyUpdate => Self::NewKeyUpdate,
+            PostHandshakeMessageType::Unknown(_) => Self::Unknown((typ, Payload::read(r))),
+        };
+        r.expect_empty("PostHandshakeMessagePayload")
+            .map(|_| payload)
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum HandshakePayload<'a> {
     HelloRequest,
     ClientHello(ClientHelloPayload),
@@ -2514,6 +2608,7 @@ pub(crate) enum HandshakePayload<'a> {
     NewSessionTicketTls13(NewSessionTicketPayloadTls13),
     EncryptedExtensions(Box<ServerExtensions<'a>>),
     KeyUpdate(KeyUpdateRequest),
+    PostHandshakeMessage(PostHandshakeMessagePayload<'a>),
     Finished(Payload<'a>),
     CertificateStatus(CertificateStatus<'a>),
     MessageHash(Payload<'a>),
@@ -2540,6 +2635,7 @@ impl HandshakePayload<'_> {
             NewSessionTicketTls13(x) => x.encode(bytes),
             EncryptedExtensions(x) => x.encode(bytes),
             KeyUpdate(x) => x.encode(bytes),
+            PostHandshakeMessage(x) => x.encode(bytes),
             Finished(x) => x.encode(bytes),
             CertificateStatus(x) => x.encode(bytes),
             MessageHash(x) => x.encode(bytes),
@@ -2565,6 +2661,7 @@ impl HandshakePayload<'_> {
             NewSessionTicket(_) | NewSessionTicketTls13(_) => HandshakeType::NewSessionTicket,
             EncryptedExtensions(_) => HandshakeType::EncryptedExtensions,
             KeyUpdate(_) => HandshakeType::KeyUpdate,
+            PostHandshakeMessage(_) => HandshakeType::PostHandshakeMessage,
             Finished(_) => HandshakeType::Finished,
             CertificateStatus(_) => HandshakeType::CertificateStatus,
             MessageHash(_) => HandshakeType::MessageHash,
@@ -2602,6 +2699,7 @@ impl HandshakePayload<'_> {
             NewSessionTicketTls13(x) => NewSessionTicketTls13(x),
             EncryptedExtensions(x) => EncryptedExtensions(Box::new(x.into_owned())),
             KeyUpdate(x) => KeyUpdate(x),
+            PostHandshakeMessage(x) => PostHandshakeMessage(x.into_owned()),
             Finished(x) => Finished(x.into_owned()),
             CertificateStatus(x) => CertificateStatus(x.into_owned()),
             MessageHash(x) => MessageHash(x.into_owned()),
@@ -2697,6 +2795,9 @@ impl<'a> HandshakeMessagePayload<'a> {
             }
             HandshakeType::KeyUpdate => {
                 HandshakePayload::KeyUpdate(KeyUpdateRequest::read(&mut sub)?)
+            }
+            HandshakeType::PostHandshakeMessage => {
+                HandshakePayload::PostHandshakeMessage(PostHandshakeMessagePayload::read(&mut sub)?)
             }
             HandshakeType::EndOfEarlyData => {
                 sub.expect_empty("EndOfEarlyData")?;

@@ -32,7 +32,7 @@ use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
     ClientSessionTicket, EncryptedClientHello, HandshakeMessagePayload, HandshakePayload,
     HelloRetryRequest, KeyShareEntry, ProtocolName, PskKeyExchangeModes, Random, ServerNamePayload,
-    SessionId, SupportedEcPointFormats, SupportedProtocolVersions, TransportParameters,
+    SessionId, SupportedEcPointFormats, SupportedProtocolVersions, TLSFlags, TransportParameters,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
@@ -235,6 +235,11 @@ fn emit_client_hello_for_retry(
             false => None,
         },
         protocols: extra_exts.protocols.clone(),
+        tls_flags: config
+            .extended_key_update
+            .then_some(TLSFlags {
+                extended_key_update: true,
+            }),
         ..Default::default()
     });
 

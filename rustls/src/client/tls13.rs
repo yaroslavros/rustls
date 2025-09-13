@@ -7,19 +7,21 @@ use subtle::ConstantTimeEq;
 
 use super::client_conn::ClientConnectionData;
 use super::hs::{ClientContext, ClientHelloInput, ClientSessionValue};
-use crate::check::inappropriate_handshake_message;
+use crate::check::{inappropriate_handshake_message, inappropriate_posthandshake_message};
 use crate::client::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
 use crate::client::ech::{self, EchState, EchStatus};
 use crate::client::{ClientConfig, ClientSessionStore, hs};
 use crate::common_state::{
-    CommonState, HandshakeFlightTls13, HandshakeKind, KxState, Protocol, Side, State,
+    CommonState, ExtendedKeyUpdate, HandshakeFlightTls13, HandshakeKind, KxState, Protocol, Side,
+    State,
 };
 use crate::conn::ConnectionRandoms;
 use crate::conn::kernel::{Direction, KernelContext, KernelState};
 use crate::crypto::hash::Hash;
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
 use crate::enums::{
-    AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
+    AlertDescription, ContentType, HandshakeType, PostHandshakeMessageType, ProtocolVersion,
+    SignatureScheme,
 };
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -31,8 +33,8 @@ use crate::msgs::enums::{ExtensionType, KeyUpdateRequest};
 use crate::msgs::handshake::{
     CERTIFICATE_MAX_SIZE_LIMIT, CertificatePayloadTls13, ClientExtensions, EchConfigPayload,
     HandshakeMessagePayload, HandshakePayload, KeyShareEntry, NewSessionTicketPayloadTls13,
-    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ServerExtensions,
-    ServerHelloPayload,
+    PostHandshakeMessagePayload, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer,
+    ServerExtensions, ServerHelloPayload, TLSFlags,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{self, Retrieved};
@@ -40,8 +42,8 @@ use crate::sign::{CertifiedKey, Signer};
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::key_schedule::{
-    KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake, KeyScheduleResumption,
-    KeyScheduleTraffic,
+    KeyScheduleEarly, KeyScheduleExtendedKeyUpdate, KeyScheduleHandshake, KeySchedulePreHandshake,
+    KeyScheduleResumption, KeyScheduleTraffic,
 };
 use crate::tls13::{
     Tls13CipherSuite, construct_client_verify_message, construct_server_verify_message,
@@ -517,6 +519,18 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             &self.config,
             exts.server_certificate_type.as_ref(),
         )?;
+
+        if self.config.extended_key_update
+            && matches!(
+                exts.tls_flags,
+                Some(TLSFlags {
+                    extended_key_update: true,
+                    ..
+                })
+            )
+        {
+            cx.common.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+        }
 
         let ech_retry_configs = match (cx.data.ech_status, &exts.encrypted_client_hello_ack) {
             // If we didn't offer ECH, or ECH was accepted, but the server sent an ECH encrypted
@@ -1402,8 +1416,8 @@ impl State<ClientConnectionData> for ExpectFinished {
             .into_pre_finished_client_traffic(
                 hash_after_handshake,
                 flight.transcript.current_hash(),
-                &*st.config.key_log,
-                &st.randoms.client,
+                st.config.key_log.clone(),
+                st.randoms.client,
             );
 
         emit_finished_tls13(&mut flight, &verify_data);
@@ -1418,7 +1432,7 @@ impl State<ClientConnectionData> for ExpectFinished {
 
         /* Now move to our application traffic keys. */
         cx.common.check_aligned_handshake()?;
-        let (key_schedule, resumption) =
+        let (key_schedule, resumption, extended_key_update) =
             key_schedule_pre_finished.into_traffic(cx.common, st.transcript.current_hash());
         cx.common
             .start_traffic(&mut cx.sendable_plaintext);
@@ -1437,6 +1451,7 @@ impl State<ClientConnectionData> for ExpectFinished {
             suite: st.suite,
             key_schedule,
             resumption,
+            extended_key_update,
             _cert_verified: st.cert_verified,
             _sig_verified: st.sig_verified,
             _fin_verified: fin,
@@ -1463,6 +1478,7 @@ struct ExpectTraffic {
     suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleTraffic,
     resumption: KeyScheduleResumption,
+    extended_key_update: KeyScheduleExtendedKeyUpdate,
     _cert_verified: verify::ServerCertVerified,
     _sig_verified: verify::HandshakeSignatureValid,
     _fin_verified: verify::FinishedMessageVerified,
@@ -1544,6 +1560,13 @@ impl ExpectTraffic {
             ));
         }
 
+        if common.extended_key_update.is_some() {
+            return Err(common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::StandardKeyUpdateReceivedWhenExtendedKeyUpdateNegotiated,
+            ));
+        }
+
         // Mustn't be interleaved with other handshake messages.
         common.check_aligned_handshake()?;
 
@@ -1580,11 +1603,86 @@ impl State<ClientConnectionData> for ExpectTraffic {
                 parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(key_update)),
                 ..
             } => self.handle_key_update(cx.common, &key_update)?,
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
+                        PostHandshakeMessagePayload::KeyUpdateRequest(ref key_share),
+                    )),
+                ..
+            } => {
+                let mut transcript = HandshakeHashBuffer::new().start_hash(
+                    cx.common
+                        .suite
+                        .expect("No suite found")
+                        .hash_provider(),
+                );
+                transcript.add_message(&m);
+
+                cx.common
+                    .extended_key_update_responder(
+                        key_share,
+                        &mut self.extended_key_update,
+                        transcript,
+                    )?;
+            }
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
+                        PostHandshakeMessagePayload::KeyUpdateResponse(ref key_share),
+                    )),
+                ..
+            } => cx
+                .common
+                .extended_key_update_initiator_respond(
+                    key_share,
+                    &mut self.extended_key_update,
+                    &m,
+                    &mut self.key_schedule,
+                )?,
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
+                        PostHandshakeMessagePayload::NewKeyUpdate,
+                    )),
+                ..
+            } => {
+                self.resumption = cx
+                    .common
+                    .extended_key_update_new_key_update(
+                        &mut self.extended_key_update,
+                        &mut self.key_schedule,
+                    )?;
+                if let Some(ExtendedKeyUpdate::Idle) = cx.common.extended_key_update {
+                    cx.common.tls13_tickets_received = 0;
+                    while self
+                        .session_storage
+                        .take_tls13_ticket(&self.server_name)
+                        .is_some()
+                    {}
+                };
+            }
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(payload)),
+                ..
+            } => {
+                return Err(inappropriate_posthandshake_message(
+                    &payload,
+                    &[
+                        PostHandshakeMessageType::KeyUpdateRequest,
+                        PostHandshakeMessageType::KeyUpdateResponse,
+                        PostHandshakeMessageType::NewKeyUpdate,
+                    ],
+                ));
+            }
             payload => {
                 return Err(inappropriate_handshake_message(
                     &payload,
                     &[ContentType::ApplicationData, ContentType::Handshake],
-                    &[HandshakeType::NewSessionTicket, HandshakeType::KeyUpdate],
+                    &[
+                        HandshakeType::NewSessionTicket,
+                        HandshakeType::KeyUpdate,
+                        HandshakeType::PostHandshakeMessage,
+                    ],
                 ));
             }
         }
@@ -1593,8 +1691,12 @@ impl State<ClientConnectionData> for ExpectTraffic {
     }
 
     fn send_key_update_request(&mut self, common: &mut CommonState) -> Result<(), Error> {
-        self.key_schedule
-            .request_key_update_and_update_encrypter(common)
+        if common.extended_key_update.is_some() {
+            common.extended_key_update_initiator()
+        } else {
+            self.key_schedule
+                .request_key_update_and_update_encrypter(common)
+        }
     }
 
     fn export_keying_material(

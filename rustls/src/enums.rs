@@ -72,6 +72,7 @@ enum_builder! {
         CertificateStatus => 0x16,
         KeyUpdate => 0x18,
         CompressedCertificate => 0x19,
+        PostHandshakeMessage => 0x1b,
         MessageHash => 0xfe,
     }
 }
@@ -597,6 +598,18 @@ enum_builder! {
     pub enum EchClientHelloType {
         ClientHelloOuter => 0,
         ClientHelloInner => 1
+    }
+}
+
+enum_builder! {
+    /// The `ProtocolVersion` TLS protocol enum.  Values in this enum are taken
+    /// from the various RFCs covering TLS, and are listed by IANA.
+    /// The `Unknown` item is used when processing unrecognised ordinals.
+    #[repr(u16)]
+    pub enum PostHandshakeMessageType {
+        KeyUpdateRequest => 0x0000,
+        KeyUpdateResponse => 0x0001,
+        NewKeyUpdate => 0x0002,
     }
 }
 
