@@ -8,7 +8,7 @@ use std::time::SystemTimeError;
 use pki_types::{AlgorithmIdentifier, ServerName, UnixTime};
 use webpki::KeyUsage;
 
-use crate::enums::{AlertDescription, ContentType, HandshakeType, PostHandshakeMessageType};
+use crate::enums::{AlertDescription, ContentType, HandshakeType, ExtendedKeyUpdateMessageType};
 use crate::msgs::handshake::{EchConfigPayload, KeyExchangeAlgorithm};
 use crate::rand;
 
@@ -38,14 +38,14 @@ pub enum Error {
         got_type: HandshakeType,
     },
 
-    /// We received a TLS post handshake message that isn't valid right now.
+    /// We received a TLS Extended Key Update handshake message that isn't valid right now.
     /// `expect_types` lists the handshake message types we can expect
     /// right now.  `got_type` is the type we found.
-    InappropriatePostHandshakeMessage {
+    InappropriateExtendedKeyUpdateMessage {
         /// Which handshake type we expected
-        expect_types: Vec<PostHandshakeMessageType>,
+        expect_types: Vec<ExtendedKeyUpdateMessageType>,
         /// What handshake type we received
-        got_type: PostHandshakeMessageType,
+        got_type: ExtendedKeyUpdateMessageType,
     },
 
     /// An error occurred while handling Encrypted Client Hello (ECH).
@@ -999,14 +999,14 @@ impl fmt::Display for Error {
                 got_type,
                 join::<HandshakeType>(expect_types)
             ),
-            Self::InappropriatePostHandshakeMessage {
+            Self::InappropriateExtendedKeyUpdateMessage {
                 expect_types,
                 got_type,
             } => write!(
                 f,
-                "received unexpected post-handshake message: got {:?} when expecting {}",
+                "received unexpected Extended Key Update message: got {:?} when expecting {}",
                 got_type,
-                join::<PostHandshakeMessageType>(expect_types)
+                join::<ExtendedKeyUpdateMessageType>(expect_types)
             ),
             Self::InvalidMessage(typ) => {
                 write!(f, "received corrupt message of type {typ:?}")

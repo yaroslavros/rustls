@@ -7,7 +7,7 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::handshake::{
     HandshakeMessagePayload, HandshakePayload, KeyShareEntry, NewSessionTicketPayloadTls13,
-    PostHandshakeMessagePayload,
+    ExtendedKeyUpdateMessagePayload,
 };
 
 mod inbound;
@@ -206,8 +206,8 @@ impl Message<'_> {
         Self {
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::PostHandshakeMessage(
-                    PostHandshakeMessagePayload::KeyUpdateRequest(key_share),
+                HandshakePayload::ExtendedKeyUpdateMessage(
+                    ExtendedKeyUpdateMessagePayload::KeyUpdateRequest(key_share),
                 ),
             )),
         }
@@ -217,8 +217,8 @@ impl Message<'_> {
         Self {
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::PostHandshakeMessage(
-                    PostHandshakeMessagePayload::KeyUpdateResponse(key_share),
+                HandshakePayload::ExtendedKeyUpdateMessage(
+                    ExtendedKeyUpdateMessagePayload::KeyUpdateResponse(key_share),
                 ),
             )),
         }
@@ -228,7 +228,7 @@ impl Message<'_> {
         Self {
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
-                HandshakePayload::PostHandshakeMessage(PostHandshakeMessagePayload::NewKeyUpdate),
+                HandshakePayload::ExtendedKeyUpdateMessage(ExtendedKeyUpdateMessagePayload::NewKeyUpdate),
             )),
         }
     }

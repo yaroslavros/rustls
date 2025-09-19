@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use super::hs::{self, HandshakeHashOrBuffer, ServerContext};
 use super::server_conn::ServerConnectionData;
 use crate::check::{
-    inappropriate_handshake_message, inappropriate_message, inappropriate_posthandshake_message,
+    inappropriate_handshake_message, inappropriate_message, inappropriate_extended_key_update_message,
 };
 use crate::common_state::{
     CommonState, HandshakeFlightTls13, HandshakeKind, Protocol, Side, State,
@@ -17,7 +17,7 @@ use crate::common_state::{
 use crate::conn::ConnectionRandoms;
 use crate::conn::kernel::{Direction, KernelContext, KernelState};
 use crate::enums::{
-    AlertDescription, ContentType, HandshakeType, PostHandshakeMessageType, ProtocolVersion,
+    AlertDescription, ContentType, HandshakeType, ExtendedKeyUpdateMessageType, ProtocolVersion,
 };
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -26,7 +26,7 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
     CERTIFICATE_MAX_SIZE_LIMIT, CertificateChain, CertificatePayloadTls13, HandshakeMessagePayload,
-    HandshakePayload, NewSessionTicketPayloadTls13, PostHandshakeMessagePayload,
+    HandshakePayload, NewSessionTicketPayloadTls13, ExtendedKeyUpdateMessagePayload,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
@@ -1535,8 +1535,8 @@ impl State<ServerConnectionData> for ExpectTraffic {
             } => self.handle_key_update(cx.common, &key_update)?,
             MessagePayload::Handshake {
                 parsed:
-                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
-                        PostHandshakeMessagePayload::KeyUpdateRequest(ref key_share),
+                    HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
+                                                ExtendedKeyUpdateMessagePayload::KeyUpdateRequest(ref key_share),
                     )),
                 ..
             } => {
@@ -1557,8 +1557,8 @@ impl State<ServerConnectionData> for ExpectTraffic {
             }
             MessagePayload::Handshake {
                 parsed:
-                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
-                        PostHandshakeMessagePayload::KeyUpdateResponse(ref key_share),
+                    HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
+                                                ExtendedKeyUpdateMessagePayload::KeyUpdateResponse(ref key_share),
                     )),
                 ..
             } => cx
@@ -1571,8 +1571,8 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 )?,
             MessagePayload::Handshake {
                 parsed:
-                    HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(
-                        PostHandshakeMessagePayload::NewKeyUpdate,
+                    HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
+                                                ExtendedKeyUpdateMessagePayload::NewKeyUpdate,
                     )),
                 ..
             } => {
@@ -1587,15 +1587,15 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 }
             },
             MessagePayload::Handshake {
-                parsed: HandshakeMessagePayload(HandshakePayload::PostHandshakeMessage(payload)),
+                parsed: HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(payload)),
                 ..
             } => {
-                return Err(inappropriate_posthandshake_message(
+                return Err(inappropriate_extended_key_update_message(
                     &payload,
                     &[
-                        PostHandshakeMessageType::KeyUpdateRequest,
-                        PostHandshakeMessageType::KeyUpdateResponse,
-                        PostHandshakeMessageType::NewKeyUpdate,
+                        ExtendedKeyUpdateMessageType::KeyUpdateRequest,
+                        ExtendedKeyUpdateMessageType::KeyUpdateResponse,
+                        ExtendedKeyUpdateMessageType::NewKeyUpdate,
                     ],
                 ));
             }
@@ -1605,7 +1605,7 @@ impl State<ServerConnectionData> for ExpectTraffic {
                     &[ContentType::ApplicationData, ContentType::Handshake],
                     &[
                         HandshakeType::KeyUpdate,
-                        HandshakeType::PostHandshakeMessage,
+                        HandshakeType::ExtendedKeyUpdateMessage,
                     ],
                 ));
             }

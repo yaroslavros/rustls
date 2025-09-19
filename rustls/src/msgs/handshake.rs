@@ -14,7 +14,7 @@ use crate::crypto::ActiveKeyExchange;
 use crate::crypto::SecureRandom;
 use crate::enums::{
     CertificateCompressionAlgorithm, CertificateType, CipherSuite, EchClientHelloType,
-    HandshakeType, PostHandshakeMessageType, ProtocolVersion, SignatureScheme,
+    HandshakeType, ExtendedKeyUpdateMessageType, ProtocolVersion, SignatureScheme,
 };
 use crate::error::InvalidMessage;
 #[cfg(feature = "tls12")]
@@ -2531,36 +2531,36 @@ impl CompressedCertificatePayload<'_> {
 }
 
 #[derive(Debug)]
-pub(crate) enum PostHandshakeMessagePayload<'a> {
+pub(crate) enum ExtendedKeyUpdateMessagePayload<'a> {
     KeyUpdateRequest(KeyShareEntry),
     KeyUpdateResponse(KeyShareEntry),
     NewKeyUpdate,
-    Unknown((PostHandshakeMessageType, Payload<'a>)),
+    Unknown((ExtendedKeyUpdateMessageType, Payload<'a>)),
 }
 
-impl<'a> PostHandshakeMessagePayload<'a> {
-    pub(crate) fn handshake_type(&self) -> PostHandshakeMessageType {
+impl<'a> ExtendedKeyUpdateMessagePayload<'a> {
+    pub(crate) fn handshake_type(&self) -> ExtendedKeyUpdateMessageType {
         match self {
-            Self::KeyUpdateRequest(_) => PostHandshakeMessageType::KeyUpdateRequest,
-            Self::KeyUpdateResponse(_) => PostHandshakeMessageType::KeyUpdateResponse,
-            Self::NewKeyUpdate => PostHandshakeMessageType::NewKeyUpdate,
+            Self::KeyUpdateRequest(_) => ExtendedKeyUpdateMessageType::KeyUpdateRequest,
+            Self::KeyUpdateResponse(_) => ExtendedKeyUpdateMessageType::KeyUpdateResponse,
+            Self::NewKeyUpdate => ExtendedKeyUpdateMessageType::NewKeyUpdate,
             Self::Unknown((t, _)) => *t,
         }
     }
 
-    fn into_owned(self) -> PostHandshakeMessagePayload<'static> {
+    fn into_owned(self) -> ExtendedKeyUpdateMessagePayload<'static> {
         match self {
-            Self::KeyUpdateRequest(x) => PostHandshakeMessagePayload::KeyUpdateRequest(x),
-            Self::KeyUpdateResponse(x) => PostHandshakeMessagePayload::KeyUpdateResponse(x),
-            Self::NewKeyUpdate => PostHandshakeMessagePayload::NewKeyUpdate,
+            Self::KeyUpdateRequest(x) => ExtendedKeyUpdateMessagePayload::KeyUpdateRequest(x),
+            Self::KeyUpdateResponse(x) => ExtendedKeyUpdateMessagePayload::KeyUpdateResponse(x),
+            Self::NewKeyUpdate => ExtendedKeyUpdateMessagePayload::NewKeyUpdate,
             Self::Unknown((typ, payload)) => {
-                PostHandshakeMessagePayload::Unknown((typ, payload.into_owned()))
+                ExtendedKeyUpdateMessagePayload::Unknown((typ, payload.into_owned()))
             }
         }
     }
 }
 
-impl<'a> Codec<'a> for PostHandshakeMessagePayload<'a> {
+impl<'a> Codec<'a> for ExtendedKeyUpdateMessagePayload<'a> {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.handshake_type().encode(bytes);
         if let Self::KeyUpdateRequest(key_share) = self {
@@ -2572,18 +2572,18 @@ impl<'a> Codec<'a> for PostHandshakeMessagePayload<'a> {
     }
 
     fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
-        let typ = PostHandshakeMessageType::read(r)?;
+        let typ = ExtendedKeyUpdateMessageType::read(r)?;
         let payload = match typ {
-            PostHandshakeMessageType::KeyUpdateRequest => {
+            ExtendedKeyUpdateMessageType::KeyUpdateRequest => {
                 Self::KeyUpdateRequest(KeyShareEntry::read(r)?)
             }
-            PostHandshakeMessageType::KeyUpdateResponse => {
+            ExtendedKeyUpdateMessageType::KeyUpdateResponse => {
                 Self::KeyUpdateResponse(KeyShareEntry::read(r)?)
             }
-            PostHandshakeMessageType::NewKeyUpdate => Self::NewKeyUpdate,
-            PostHandshakeMessageType::Unknown(_) => Self::Unknown((typ, Payload::read(r))),
+            ExtendedKeyUpdateMessageType::NewKeyUpdate => Self::NewKeyUpdate,
+            ExtendedKeyUpdateMessageType::Unknown(_) => Self::Unknown((typ, Payload::read(r))),
         };
-        r.expect_empty("PostHandshakeMessagePayload")
+        r.expect_empty("ExtendedKeyUpdateMessagePayload")
             .map(|_| payload)
     }
 }
@@ -2608,7 +2608,7 @@ pub(crate) enum HandshakePayload<'a> {
     NewSessionTicketTls13(NewSessionTicketPayloadTls13),
     EncryptedExtensions(Box<ServerExtensions<'a>>),
     KeyUpdate(KeyUpdateRequest),
-    PostHandshakeMessage(PostHandshakeMessagePayload<'a>),
+    ExtendedKeyUpdateMessage(ExtendedKeyUpdateMessagePayload<'a>),
     Finished(Payload<'a>),
     CertificateStatus(CertificateStatus<'a>),
     MessageHash(Payload<'a>),
@@ -2635,7 +2635,7 @@ impl HandshakePayload<'_> {
             NewSessionTicketTls13(x) => x.encode(bytes),
             EncryptedExtensions(x) => x.encode(bytes),
             KeyUpdate(x) => x.encode(bytes),
-            PostHandshakeMessage(x) => x.encode(bytes),
+            ExtendedKeyUpdateMessage(x) => x.encode(bytes),
             Finished(x) => x.encode(bytes),
             CertificateStatus(x) => x.encode(bytes),
             MessageHash(x) => x.encode(bytes),
@@ -2661,7 +2661,7 @@ impl HandshakePayload<'_> {
             NewSessionTicket(_) | NewSessionTicketTls13(_) => HandshakeType::NewSessionTicket,
             EncryptedExtensions(_) => HandshakeType::EncryptedExtensions,
             KeyUpdate(_) => HandshakeType::KeyUpdate,
-            PostHandshakeMessage(_) => HandshakeType::PostHandshakeMessage,
+            ExtendedKeyUpdateMessage(_) => HandshakeType::ExtendedKeyUpdateMessage,
             Finished(_) => HandshakeType::Finished,
             CertificateStatus(_) => HandshakeType::CertificateStatus,
             MessageHash(_) => HandshakeType::MessageHash,
@@ -2699,7 +2699,7 @@ impl HandshakePayload<'_> {
             NewSessionTicketTls13(x) => NewSessionTicketTls13(x),
             EncryptedExtensions(x) => EncryptedExtensions(Box::new(x.into_owned())),
             KeyUpdate(x) => KeyUpdate(x),
-            PostHandshakeMessage(x) => PostHandshakeMessage(x.into_owned()),
+            ExtendedKeyUpdateMessage(x) => ExtendedKeyUpdateMessage(x.into_owned()),
             Finished(x) => Finished(x.into_owned()),
             CertificateStatus(x) => CertificateStatus(x.into_owned()),
             MessageHash(x) => MessageHash(x.into_owned()),
@@ -2796,8 +2796,8 @@ impl<'a> HandshakeMessagePayload<'a> {
             HandshakeType::KeyUpdate => {
                 HandshakePayload::KeyUpdate(KeyUpdateRequest::read(&mut sub)?)
             }
-            HandshakeType::PostHandshakeMessage => {
-                HandshakePayload::PostHandshakeMessage(PostHandshakeMessagePayload::read(&mut sub)?)
+            HandshakeType::ExtendedKeyUpdateMessage => {
+                HandshakePayload::ExtendedKeyUpdateMessage(ExtendedKeyUpdateMessagePayload::read(&mut sub)?)
             }
             HandshakeType::EndOfEarlyData => {
                 sub.expect_empty("EndOfEarlyData")?;
