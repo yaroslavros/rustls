@@ -1553,6 +1553,7 @@ impl State<ServerConnectionData> for ExpectTraffic {
                         key_share,
                         &mut self.extended_key_update,
                         transcript,
+                        &mut self.key_schedule,
                     )?;
             }
             MessagePayload::Handshake {

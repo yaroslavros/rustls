@@ -25,7 +25,9 @@ use crate::record_layer::PreEncryptAction;
 use crate::suites::{PartiallyExtractedSecrets, SupportedCipherSuite};
 #[cfg(feature = "tls12")]
 use crate::tls12::ConnectionSecrets;
-use crate::tls13::key_schedule::{KeyScheduleExtendedKeyUpdate, KeyScheduleResumption, KeyScheduleTraffic};
+use crate::tls13::key_schedule::{
+    KeyScheduleExtendedKeyUpdate, KeyScheduleResumption, KeyScheduleTraffic,
+};
 use crate::unbuffered::{EncryptError, InsufficientSizeError};
 use crate::vecbuf::ChunkVecBuffer;
 use crate::{quic, record_layer};
@@ -811,6 +813,7 @@ impl CommonState {
         key_share: &KeyShareEntry,
         ks_eku: &mut KeyScheduleExtendedKeyUpdate,
         mut transcript_eku: HandshakeHash,
+        ks: &mut KeyScheduleTraffic,
     ) -> Result<(), Error> {
         let Some(ref mut extended_key_update_status) = self.extended_key_update else {
             return Err(self.send_fatal_alert(
@@ -853,6 +856,7 @@ impl CommonState {
         transcript_eku.add_message(&msg);
         self.send_msg_encrypt(msg.into());
         ks_eku.input_eku_secret(ckx.secret, transcript_eku.current_hash());
+        ks_eku.responder_key_update_request(ks, self);
         self.extended_key_update = Some(ExtendedKeyUpdate::Responded);
 
         Ok(())
@@ -893,8 +897,8 @@ impl CommonState {
         self.check_aligned_handshake()?;
         let msg = Message::build_extended_key_update_new_key();
         self.send_msg_encrypt(msg.into());
-        ks_eku.initiator_send(ks, self);
-        self.extended_key_update = Some(ExtendedKeyUpdate::NewKeySent);
+        ks_eku.initiator(ks, self);
+        self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
 
         Ok(())
     }
@@ -905,28 +909,22 @@ impl CommonState {
         ks: &mut KeyScheduleTraffic,
     ) -> Result<KeyScheduleResumption, Error> {
         match self.extended_key_update {
-            Some(ExtendedKeyUpdate::NewKeySent) => {
-                self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
-                Ok(ks_eku.initiator_recv(ks, self))
-            }
             Some(ExtendedKeyUpdate::Responded) => {
                 self.check_aligned_handshake()?;
-                let msg = Message::build_extended_key_update_new_key();
-                self.send_msg_encrypt(msg.into());
                 self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
-                Ok(ks_eku.responder(ks, self))
+                Ok(ks_eku.responder_new_key_update(ks, self))
             }
             Some(_) => {
-                return Err(self.send_fatal_alert(
+                Err(self.send_fatal_alert(
                     AlertDescription::UnexpectedMessage,
                     PeerMisbehaved::ExtendedKeyUpdateNewKeyBeforeExchange,
-                ));
+                ))
             }
             None => {
-                return Err(self.send_fatal_alert(
+                Err(self.send_fatal_alert(
                     AlertDescription::UnexpectedMessage,
                     PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
-                ));
+                ))
             }
         }
     }
@@ -1204,7 +1202,6 @@ pub(crate) enum ExtendedKeyUpdate {
     Idle,
     Initiated(Box<dyn ActiveKeyExchange>, HandshakeHash),
     Responded,
-    NewKeySent,
 }
 
 const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;

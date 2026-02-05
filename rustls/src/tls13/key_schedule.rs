@@ -375,21 +375,21 @@ impl KeyScheduleBeforeFinished {
         ks.input_empty();
 
         let current_client_traffic_secret = ks.derive_logged_secret(
-            SecretKind::ClientApplicationTrafficSecret,
+            SecretKind::ClientApplicationTrafficSecret(0),
             hs_hash.as_ref(),
             &*key_log,
             &client_random,
         );
 
         let current_server_traffic_secret = ks.derive_logged_secret(
-            SecretKind::ServerApplicationTrafficSecret,
+            SecretKind::ServerApplicationTrafficSecret(0),
             hs_hash.as_ref(),
             &*key_log,
             &client_random,
         );
 
         let current_exporter_secret = ks.derive_logged_secret(
-            SecretKind::ExporterMasterSecret,
+            SecretKind::ExporterMasterSecret(0),
             hs_hash.as_ref(),
             &*key_log,
             &client_random,
@@ -458,7 +458,7 @@ pub(crate) struct KeyScheduleExtendedKeyUpdate {
 impl KeyScheduleExtendedKeyUpdate {
     pub(crate) fn input_eku_secret(&mut self, shared_secret: SharedSecret, eku_hash: hash::Output) {
         self.ks
-            .input_eku_secret(shared_secret.secret_bytes());
+            .input_secret(shared_secret.secret_bytes());
         self.iteration += 1;
         self.eku_hash = Some(eku_hash);
     }
@@ -469,7 +469,7 @@ impl KeyScheduleExtendedKeyUpdate {
         common: &mut CommonState,
     ) {
         key_schedule_traffic.current_client_traffic_secret = self.ks.derive_logged_secret(
-            SecretKind::ClientApplicationTrafficSecretEKU(self.iteration),
+            SecretKind::ClientApplicationTrafficSecret(self.iteration),
             self.eku_hash
                 .as_ref()
                 .expect("No EKU hash")
@@ -494,7 +494,7 @@ impl KeyScheduleExtendedKeyUpdate {
         common: &mut CommonState,
     ) {
         key_schedule_traffic.current_server_traffic_secret = self.ks.derive_logged_secret(
-            SecretKind::ServerApplicationTrafficSecretEKU(self.iteration),
+            SecretKind::ServerApplicationTrafficSecret(self.iteration),
             self.eku_hash
                 .as_ref()
                 .expect("No EKU hash")
@@ -518,7 +518,7 @@ impl KeyScheduleExtendedKeyUpdate {
         key_schedule_traffic: &mut KeyScheduleTraffic,
     ) -> KeyScheduleResumption {
         key_schedule_traffic.current_exporter_secret = self.ks.derive_logged_secret(
-            SecretKind::ExporterMasterSecretEKU(self.iteration),
+            SecretKind::ExporterMasterSecret(self.iteration),
             self.eku_hash
                 .as_ref()
                 .expect("No EKU hash")
@@ -529,7 +529,7 @@ impl KeyScheduleExtendedKeyUpdate {
         KeyScheduleResumption {
             ks: self.ks.inner,
             resumption_master_secret: self.ks.derive(
-                SecretKind::ResumptionMasterSecretEKU,
+                SecretKind::ResumptionMasterSecret,
                 self.eku_hash
                     .as_ref()
                     .expect("No EKU hash")
@@ -538,7 +538,7 @@ impl KeyScheduleExtendedKeyUpdate {
         }
     }
 
-    pub(crate) fn initiator_send(
+    pub(crate) fn responder_key_update_request(
         &self,
         key_schedule_traffic: &mut KeyScheduleTraffic,
         common: &mut CommonState,
@@ -550,7 +550,7 @@ impl KeyScheduleExtendedKeyUpdate {
         }
     }
 
-    pub(crate) fn initiator_recv(
+    pub(crate) fn responder_new_key_update(
         &self,
         key_schedule_traffic: &mut KeyScheduleTraffic,
         common: &mut CommonState,
@@ -563,7 +563,7 @@ impl KeyScheduleExtendedKeyUpdate {
         self.update_exporter_resumption(key_schedule_traffic)
     }
 
-    pub(crate) fn responder(
+    pub(crate) fn initiator(
         &self,
         key_schedule_traffic: &mut KeyScheduleTraffic,
         common: &mut CommonState,
@@ -823,14 +823,6 @@ impl KeySchedule {
     /// Input the given secret.
     fn input_secret(&mut self, secret: &[u8]) {
         let salt = self.derive_for_empty_hash(SecretKind::DerivedSecret);
-        self.current = self
-            .suite
-            .hkdf_provider
-            .extract_from_secret(Some(salt.as_ref()), secret);
-    }
-
-    fn input_eku_secret(&mut self, secret: &[u8]) {
-        let salt = self.derive_for_empty_hash(SecretKind::DerivedSecretEKU);
         self.current = self
             .suite
             .hkdf_provider
@@ -1147,18 +1139,13 @@ enum SecretKind {
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
-    ClientApplicationTrafficSecret,
-    ServerApplicationTrafficSecret,
-    ExporterMasterSecret,
+    ClientApplicationTrafficSecret(u64),
+    ServerApplicationTrafficSecret(u64),
+    ExporterMasterSecret(u64),
     ResumptionMasterSecret,
     DerivedSecret,
     ServerEchConfirmationSecret,
     ServerEchHrrConfirmationSecret,
-    ClientApplicationTrafficSecretEKU(u64),
-    ServerApplicationTrafficSecretEKU(u64),
-    ExporterMasterSecretEKU(u64),
-    ResumptionMasterSecretEKU,
-    DerivedSecretEKU,
 }
 
 impl SecretKind {
@@ -1169,20 +1156,15 @@ impl SecretKind {
             ClientEarlyTrafficSecret => b"c e traffic",
             ClientHandshakeTrafficSecret => b"c hs traffic",
             ServerHandshakeTrafficSecret => b"s hs traffic",
-            ClientApplicationTrafficSecret => b"c ap traffic",
-            ServerApplicationTrafficSecret => b"s ap traffic",
-            ExporterMasterSecret => b"exp master",
+            ClientApplicationTrafficSecret(_) => b"c ap traffic",
+            ServerApplicationTrafficSecret(_) => b"s ap traffic",
+            ExporterMasterSecret(_) => b"exp master",
             ResumptionMasterSecret => b"res master",
             DerivedSecret => b"derived",
             // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-18#section-7.2
             ServerEchConfirmationSecret => b"ech accept confirmation",
             // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-18#section-7.2.1
             ServerEchHrrConfirmationSecret => b"hrr ech accept confirmation",
-            ClientApplicationTrafficSecretEKU(_) => b"c ap traffic2",
-            ServerApplicationTrafficSecretEKU(_) => b"s ap traffic2",
-            ExporterMasterSecretEKU(_) => b"exp master2",
-            ResumptionMasterSecretEKU => b"res master2",
-            DerivedSecretEKU => b"key derived",
         }
     }
 
@@ -1192,12 +1174,9 @@ impl SecretKind {
             ClientEarlyTrafficSecret => "CLIENT_EARLY_TRAFFIC_SECRET".to_string(),
             ClientHandshakeTrafficSecret => "CLIENT_HANDSHAKE_TRAFFIC_SECRET".to_string(),
             ServerHandshakeTrafficSecret => "SERVER_HANDSHAKE_TRAFFIC_SECRET".to_string(),
-            ClientApplicationTrafficSecret => "CLIENT_TRAFFIC_SECRET_0".to_string(),
-            ServerApplicationTrafficSecret => "SERVER_TRAFFIC_SECRET_0".to_string(),
-            ExporterMasterSecret => "EXPORTER_SECRET".to_string(),
-            ClientApplicationTrafficSecretEKU(i) => format!("CLIENT_TRAFFIC_SECRET_{}", i),
-            ServerApplicationTrafficSecretEKU(i) => format!("SERVER_TRAFFIC_SECRET_{}", i),
-            ExporterMasterSecretEKU(i) => format!("EXPORTER_SECRET_{}", i),
+            ClientApplicationTrafficSecret(i) => format!("CLIENT_TRAFFIC_SECRET_{}", i),
+            ServerApplicationTrafficSecret(i) => format!("SERVER_TRAFFIC_SECRET_{}", i),
+            ExporterMasterSecret(i) => format!("EXPORTER_SECRET_{}", i),
             _ => {
                 return None;
             }
@@ -1362,7 +1341,7 @@ mod tests {
 
         assert_traffic_secret(
             &ks,
-            SecretKind::ClientApplicationTrafficSecret,
+            SecretKind::ClientApplicationTrafficSecret(0),
             &hs_full_hash,
             &client_ats,
             &client_ats_key,
@@ -1371,7 +1350,7 @@ mod tests {
 
         assert_traffic_secret(
             &ks,
-            SecretKind::ServerApplicationTrafficSecret,
+            SecretKind::ServerApplicationTrafficSecret(0),
             &hs_full_hash,
             &server_ats,
             &server_ats_key,
