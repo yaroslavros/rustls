@@ -7,7 +7,7 @@ use crate::conn::kernel::KernelState;
 use crate::crypto::{ActiveKeyExchange, SupportedKxGroup};
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
-use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
+use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, error, warn};
 use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
@@ -786,7 +786,8 @@ impl CommonState {
     }
 
     pub(crate) fn extended_key_update_initiator(&mut self) -> Result<(), Error> {
-        let Some(ExtendedKeyUpdate::Idle) = self.extended_key_update else {
+        let Some(ExtendedKeyUpdate::Idle(mut full_transcript)) = self.extended_key_update.take()
+        else {
             return Ok(());
         };
         let KxState::Complete(kx) = self.kx_state else {
@@ -797,14 +798,14 @@ impl CommonState {
             akx.group(),
             akx.pub_key(),
         ));
-        let mut transcript = HandshakeHashBuffer::new().start_hash(
-            self.suite
-                .expect("No suite found")
-                .hash_provider(),
-        );
-        transcript.add_message(&msg);
+        let previous_transcript = full_transcript.clone();
+        full_transcript.add_message(&msg);
         self.send_msg_encrypt(msg.into());
-        self.extended_key_update = Some(ExtendedKeyUpdate::Initiated(akx, transcript));
+        self.extended_key_update = Some(ExtendedKeyUpdate::Initiated {
+            kx: akx,
+            full_transcript,
+            previous_transcript,
+        });
         Ok(())
     }
 
@@ -812,29 +813,35 @@ impl CommonState {
         &mut self,
         key_share: &KeyShareEntry,
         ks_eku: &mut KeyScheduleExtendedKeyUpdate,
-        mut transcript_eku: HandshakeHash,
+        m: &Message<'_>,
         ks: &mut KeyScheduleTraffic,
     ) -> Result<(), Error> {
-        let Some(ref mut extended_key_update_status) = self.extended_key_update else {
+        let Some(extended_key_update_status) = self.extended_key_update.take() else {
             return Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
                 PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
             ));
         };
-        match extended_key_update_status {
-            ExtendedKeyUpdate::Initiated(our_key_share, _) => {
-                if key_share.payload.0.as_slice() <= our_key_share.pub_key() {
-                    return Ok(());
-                }
+        let mut transcript = match extended_key_update_status {
+            ExtendedKeyUpdate::Initiated {
+                kx: ref our_key_share,
+                ..
+            } if key_share.payload.0.as_slice() <= our_key_share.pub_key() => {
+                self.extended_key_update = Some(extended_key_update_status);
+                return Ok(());
             }
-            ExtendedKeyUpdate::Idle => {}
+            ExtendedKeyUpdate::Initiated {
+                previous_transcript,
+                ..
+            } => previous_transcript,
+            ExtendedKeyUpdate::Idle(transcript) => transcript,
             _ => {
                 return Err(self.send_fatal_alert(
                     AlertDescription::UnexpectedMessage,
                     PeerMisbehaved::ExtendedKeyUpdateRequestWhileAnotherInProgress,
                 ));
             }
-        }
+        };
         let KxState::Complete(kx) = self.kx_state else {
             return Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
@@ -853,11 +860,12 @@ impl CommonState {
             .map_err(|err| self.send_fatal_alert(AlertDescription::IllegalParameter, err))?;
         let msg =
             Message::build_extended_key_update_response(KeyShareEntry::new(ckx.group, ckx.pub_key));
-        transcript_eku.add_message(&msg);
+        transcript.add_message(&m);
+        transcript.add_message(&msg);
         self.send_msg_encrypt(msg.into());
-        ks_eku.input_eku_secret(ckx.secret, transcript_eku.current_hash());
+        ks_eku.input_eku_secret(ckx.secret, transcript.current_hash());
         ks_eku.responder_key_update_request(ks, self);
-        self.extended_key_update = Some(ExtendedKeyUpdate::Responded);
+        self.extended_key_update = Some(ExtendedKeyUpdate::Responded(transcript));
 
         Ok(())
     }
@@ -869,36 +877,39 @@ impl CommonState {
         msg: &Message<'_>,
         ks: &mut KeyScheduleTraffic,
     ) -> Result<(), Error> {
-        let Some(mut extended_key_update_status) = self.extended_key_update.take() else {
+        let Some(extended_key_update_status) = self.extended_key_update.take() else {
             return Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
                 PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
             ));
         };
-        let ExtendedKeyUpdate::Initiated(our_key_share, ref mut transcript_eku) =
-            extended_key_update_status
+        let ExtendedKeyUpdate::Initiated {
+            kx,
+            mut full_transcript,
+            ..
+        } = extended_key_update_status
         else {
             return Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
                 PeerMisbehaved::ExtendedKeyUpdateResponseWithoutRequest,
             ));
         };
-        if key_share.group != our_key_share.group() {
+        if key_share.group != kx.group() {
             return Err(self.send_fatal_alert(
                 AlertDescription::UnexpectedMessage,
                 PeerMisbehaved::ExtendedKeyUpdateResponseWithDifferentGroup,
             ));
         }
-        let secret = our_key_share
+        let secret = kx
             .complete(&key_share.payload.0)
             .map_err(|err| self.send_fatal_alert(AlertDescription::IllegalParameter, err))?;
-        transcript_eku.add_message(&msg);
-        ks_eku.input_eku_secret(secret, transcript_eku.current_hash());
+        full_transcript.add_message(&msg);
+        ks_eku.input_eku_secret(secret, full_transcript.current_hash());
         self.check_aligned_handshake()?;
         let msg = Message::build_extended_key_update_new_key();
         self.send_msg_encrypt(msg.into());
         ks_eku.initiator(ks, self);
-        self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+        self.extended_key_update = Some(ExtendedKeyUpdate::Idle(full_transcript));
 
         Ok(())
     }
@@ -908,24 +919,20 @@ impl CommonState {
         ks_eku: &mut KeyScheduleExtendedKeyUpdate,
         ks: &mut KeyScheduleTraffic,
     ) -> Result<KeyScheduleResumption, Error> {
-        match self.extended_key_update {
-            Some(ExtendedKeyUpdate::Responded) => {
+        match self.extended_key_update.take() {
+            Some(ExtendedKeyUpdate::Responded(transcript)) => {
                 self.check_aligned_handshake()?;
-                self.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+                self.extended_key_update = Some(ExtendedKeyUpdate::Idle(transcript));
                 Ok(ks_eku.responder_new_key_update(ks, self))
             }
-            Some(_) => {
-                Err(self.send_fatal_alert(
-                    AlertDescription::UnexpectedMessage,
-                    PeerMisbehaved::ExtendedKeyUpdateNewKeyBeforeExchange,
-                ))
-            }
-            None => {
-                Err(self.send_fatal_alert(
-                    AlertDescription::UnexpectedMessage,
-                    PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
-                ))
-            }
+            Some(_) => Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateNewKeyBeforeExchange,
+            )),
+            None => Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::ExtendedKeyUpdateWithoutNegotiation,
+            )),
         }
     }
 }
@@ -1199,9 +1206,14 @@ pub(crate) type HandshakeFlightTls12<'a> = HandshakeFlight<'a, false>;
 pub(crate) type HandshakeFlightTls13<'a> = HandshakeFlight<'a, true>;
 
 pub(crate) enum ExtendedKeyUpdate {
-    Idle,
-    Initiated(Box<dyn ActiveKeyExchange>, HandshakeHash),
-    Responded,
+    Handshake,
+    Idle(HandshakeHash),
+    Initiated {
+        kx: Box<dyn ActiveKeyExchange>,
+        full_transcript: HandshakeHash,
+        previous_transcript: HandshakeHash,
+    },
+    Responded(HandshakeHash),
 }
 
 const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;

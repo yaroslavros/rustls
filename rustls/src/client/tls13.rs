@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 
 use super::client_conn::ClientConnectionData;
 use super::hs::{ClientContext, ClientHelloInput, ClientSessionValue};
-use crate::check::{inappropriate_handshake_message, inappropriate_extended_key_update_message};
+use crate::check::{inappropriate_extended_key_update_message, inappropriate_handshake_message};
 use crate::client::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
 use crate::client::ech::{self, EchState, EchStatus};
 use crate::client::{ClientConfig, ClientSessionStore, hs};
@@ -20,7 +20,7 @@ use crate::conn::kernel::{Direction, KernelContext, KernelState};
 use crate::crypto::hash::Hash;
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
 use crate::enums::{
-    AlertDescription, ContentType, HandshakeType, ExtendedKeyUpdateMessageType, ProtocolVersion,
+    AlertDescription, ContentType, ExtendedKeyUpdateMessageType, HandshakeType, ProtocolVersion,
     SignatureScheme,
 };
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
@@ -32,8 +32,8 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::{ExtensionType, KeyUpdateRequest};
 use crate::msgs::handshake::{
     CERTIFICATE_MAX_SIZE_LIMIT, CertificatePayloadTls13, ClientExtensions, EchConfigPayload,
-    HandshakeMessagePayload, HandshakePayload, KeyShareEntry, NewSessionTicketPayloadTls13,
-    ExtendedKeyUpdateMessagePayload, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer,
+    ExtendedKeyUpdateMessagePayload, HandshakeMessagePayload, HandshakePayload, KeyShareEntry,
+    NewSessionTicketPayloadTls13, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer,
     ServerExtensions, ServerHelloPayload, TLSFlags,
 };
 use crate::msgs::message::{Message, MessagePayload};
@@ -529,7 +529,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 })
             )
         {
-            cx.common.extended_key_update = Some(ExtendedKeyUpdate::Idle);
+            cx.common.extended_key_update = Some(ExtendedKeyUpdate::Handshake);
         }
 
         let ech_retry_configs = match (cx.data.ech_status, &exts.encrypted_client_hello_ack) {
@@ -1434,6 +1434,11 @@ impl State<ClientConnectionData> for ExpectFinished {
         cx.common.check_aligned_handshake()?;
         let (key_schedule, resumption, extended_key_update) =
             key_schedule_pre_finished.into_traffic(cx.common, st.transcript.current_hash());
+
+        if let Some(ExtendedKeyUpdate::Handshake) = cx.common.extended_key_update {
+            cx.common.extended_key_update = Some(ExtendedKeyUpdate::Idle(st.transcript));
+        }
+
         cx.common
             .start_traffic(&mut cx.sendable_plaintext);
 
@@ -1606,30 +1611,22 @@ impl State<ClientConnectionData> for ExpectTraffic {
             MessagePayload::Handshake {
                 parsed:
                     HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
-                                                ExtendedKeyUpdateMessagePayload::KeyUpdateRequest(ref key_share),
+                        ExtendedKeyUpdateMessagePayload::KeyUpdateRequest(ref key_share),
                     )),
                 ..
             } => {
-                let mut transcript = HandshakeHashBuffer::new().start_hash(
-                    cx.common
-                        .suite
-                        .expect("No suite found")
-                        .hash_provider(),
-                );
-                transcript.add_message(&m);
-
                 cx.common
                     .extended_key_update_responder(
                         key_share,
                         &mut self.extended_key_update,
-                        transcript,
+                        &m,
                         &mut self.key_schedule,
                     )?;
             }
             MessagePayload::Handshake {
                 parsed:
                     HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
-                                                ExtendedKeyUpdateMessagePayload::KeyUpdateResponse(ref key_share),
+                        ExtendedKeyUpdateMessagePayload::KeyUpdateResponse(ref key_share),
                     )),
                 ..
             } => cx
@@ -1643,7 +1640,7 @@ impl State<ClientConnectionData> for ExpectTraffic {
             MessagePayload::Handshake {
                 parsed:
                     HandshakeMessagePayload(HandshakePayload::ExtendedKeyUpdateMessage(
-                                                ExtendedKeyUpdateMessagePayload::NewKeyUpdate,
+                        ExtendedKeyUpdateMessagePayload::NewKeyUpdate,
                     )),
                 ..
             } => {
@@ -1653,7 +1650,7 @@ impl State<ClientConnectionData> for ExpectTraffic {
                         &mut self.extended_key_update,
                         &mut self.key_schedule,
                     )?;
-                if let Some(ExtendedKeyUpdate::Idle) = cx.common.extended_key_update {
+                if let Some(ExtendedKeyUpdate::Idle(_)) = cx.common.extended_key_update {
                     cx.common.tls13_tickets_received = 0;
                     while self
                         .session_storage
