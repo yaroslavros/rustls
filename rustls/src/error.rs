@@ -217,6 +217,8 @@ pub enum InvalidMessage {
     UnknownHelloRetryRequestExtension,
     /// The peer sent a TLS1.3 Certificate with an unknown extension
     UnknownCertificateExtension,
+    /// A peer sent an invalid tls_flags extension (all-zero or trailing zeros)
+    InvalidTlsFlags,
 }
 
 impl From<InvalidMessage> for Error {
@@ -232,6 +234,7 @@ impl From<InvalidMessage> for AlertDescription {
             InvalidMessage::PreSharedKeyIsNotFinalExtension => Self::IllegalParameter,
             InvalidMessage::DuplicateExtension(_) => Self::IllegalParameter,
             InvalidMessage::UnknownHelloRetryRequestExtension => Self::UnsupportedExtension,
+            InvalidMessage::InvalidTlsFlags => Self::IllegalParameter,
             _ => Self::DecodeError,
         }
     }

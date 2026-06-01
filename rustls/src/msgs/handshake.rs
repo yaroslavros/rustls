@@ -829,19 +829,25 @@ pub(crate) struct TLSFlags {
 }
 
 impl Codec<'_> for TLSFlags {
+    // Specific tls flag number for Extended Key Update isn't provisioned yet,
+    // using the 0th bit for now.
     fn encode(&self, bytes: &mut Vec<u8>) {
-        if self.extended_key_update {
-            1u8.encode(bytes);
-        } else {
-            0u8.encode(bytes);
-        }
+        // Illegal to send zero flags, should not be called at all then.
+        debug_assert!(self.extended_key_update);
+        // No other flags are supported as of now, so it's 0b1 or nothing.
+        PayloadU8::<NonEmpty>::encode_slice(&[0b1], bytes)
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
-        let Ok(byte) = u8::read(r) else {
-            return Err(InvalidMessage::MissingData("TLSFlags"));
-        };
-        let extended_key_update = byte & 1 == 1;
+        let flags = PayloadU8::<NonEmpty>::read(r)?;
+        if flags.0.iter().all(|&b| b == 0) { // must reject all-zero flags
+            return Err(InvalidMessage::InvalidTlsFlags);
+        }
+        if flags.0.last() == Some(&0) { // must reject trailing zeroes
+            return Err(InvalidMessage::InvalidTlsFlags);
+        }
+        // Ignore bits other than the 0th one (LSB)
+        let extended_key_update = flags.0[0] & 1 == 1;
         Ok(Self {
             extended_key_update,
         })
